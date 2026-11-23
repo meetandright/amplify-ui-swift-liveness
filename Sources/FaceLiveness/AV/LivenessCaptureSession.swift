@@ -11,7 +11,10 @@ import AVFoundation
 class LivenessCaptureSession {
     let captureDevice: LivenessCaptureDevice
     private let captureQueue = DispatchQueue(label: "com.amazonaws.faceliveness.cameracapturequeue")
-    private let configurationQueue = DispatchQueue(label: "com.amazonaws.faceliveness.sessionconfiguration", qos: .userInteractive)
+    /// Starts and stops every capture session, one at a time and off the main thread:
+    /// `startRunning`, `stopRunning` and a change to a session's inputs or outputs all wait for
+    /// the camera. Shared, so a new session starts only after the last one has stopped.
+    private static let configurationQueue = DispatchQueue(label: "com.amazonaws.faceliveness.sessionconfiguration", qos: .userInteractive)
     let outputDelegate: AVCaptureVideoDataOutputSampleBufferDelegate
     var captureSession: AVCaptureSession?
     
@@ -72,7 +75,7 @@ class LivenessCaptureSession {
         guard let session = captureSession else { return }
         let diagnostics = outputSampleBufferCapturer?.diagnostics
         let facing = captureDevice.avCaptureDevice?.position
-        configurationQueue.async {
+        Self.configurationQueue.async {
             session.startRunning()
             if session.isRunning {
                 diagnostics?.onCameraBound(facing: facing == .back ? "back" : "front")
@@ -103,22 +106,27 @@ class LivenessCaptureSession {
         outputSampleBufferCapturer?.previewFrameHandler.value = nil
     }
 
+    /// Lets go of the session at once and stops it on the configuration queue. Callers are on
+    /// the main thread (a timed out check, the close button, the app leaving the foreground),
+    /// and stopping a session or removing its input there froze the screen for more than two
+    /// seconds when a check timed out (`-[AVCaptureSession removeInput:]` waiting in
+    /// `_buildAndRunGraph`, iPhone 16 Pro Max, iOS 27.2.1).
     func stopRunning() {
         guard let session = captureSession else { return }
-        defer {
-            captureSession = nil
-        }
+        captureSession = nil
 
-        if session.isRunning {
-            session.stopRunning()
-        }
+        Self.configurationQueue.async {
+            if session.isRunning {
+                session.stopRunning()
+            }
 
-        for input in session.inputs {
-            session.removeInput(input)
-        }
-        
-        for output in session.outputs {
-            session.removeOutput(output)
+            for input in session.inputs {
+                session.removeInput(input)
+            }
+
+            for output in session.outputs {
+                session.removeOutput(output)
+            }
         }
     }
 
